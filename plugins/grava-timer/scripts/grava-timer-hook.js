@@ -23,6 +23,14 @@
 //
 // This script must NEVER block or break Claude: it always exits 0 silently.
 
+// Node's global fetch (undici) ignores HTTP(S)_PROXY by default. In a cloud
+// sandbox that means it bypasses Anthropic's agent proxy — the one that injects
+// the stored Grava API credential — and hits the backend unauthenticated (403).
+// Opt fetch into the environment proxy so the credential is attached. The hook
+// command also sets this before `node` starts (hooks.json), which is the
+// reliable path; this line is a backstop for any invocation that doesn't.
+process.env.NODE_USE_ENV_PROXY = process.env.NODE_USE_ENV_PROXY || '1';
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
