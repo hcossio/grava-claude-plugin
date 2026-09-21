@@ -1,0 +1,16 @@
+{
+  "name": "grava",
+  "owner": {
+    "name": "hcossio"
+  },
+  "description": "Grava time-tracking plugins for Claude Code.",
+  "plugins": [
+    {
+      "name": "grava-timer",
+      "source": "./plugins/grava-timer",
+      "description": "Auto-track Claude Code thread time to a Grava project or client.",
+      "category": "productivity",
+      "keywords": ["time-tracking", "grava", "timer"]
+    }
+  ]
+}

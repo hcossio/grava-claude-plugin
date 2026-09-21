@@ -1,0 +1,7 @@
+{
+  "name": "grava-timer",
+  "displayName": "Grava Timer",
+  "version": "1.0.0",
+  "description": "Automatically tracks Claude Code thread time to a Grava project or client. Reads the Grava target from the project's cloud-environment variables (GRAVA_API_URL, GRAVA_PROJECT_ID or GRAVA_CLIENT_ID, GRAVA_NAME) and starts/stops a timer per thread.",
+  "author": { "name": "hcossio" }
+}
