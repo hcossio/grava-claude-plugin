@@ -88,9 +88,21 @@ function readStdin() {
   });
 }
 
+// Project threads don't deliver a clean prompt — the coordinator wraps it in a
+// system envelope like <wake reason="mention" current-time="...">real task</wake>
+// (and other <...> reminders). Strip XML-ish tags so the timer name reflects the
+// task, not the envelope; if nothing readable remains, callers fall back to a
+// clean default ("Claude Code — <project name>").
+function cleanPromptText(raw) {
+  return String(raw || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function summarizePrompt(prompt) {
   if (!prompt) return null;
-  let text = String(prompt).replace(/\s+/g, ' ').trim();
+  let text = cleanPromptText(prompt);
   if (!text || text.startsWith('/')) return null;
 
   const sentenceEnd = text.search(/[.!?]\s/);
@@ -211,7 +223,7 @@ async function getSessionName(config, sessionId, prompt) {
   } catch (_) {}
 
   const current = state[sessionId] && state[sessionId].name ? state[sessionId].name : null;
-  const text = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const text = cleanPromptText(prompt);
 
   if (current) {
     if (!text || text.startsWith('/') || looksLikeContinuation(text)) return current;
