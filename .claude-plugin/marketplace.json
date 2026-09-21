@@ -8,7 +8,7 @@
     {
       "name": "grava-timer",
       "source": "./plugins/grava-timer",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Auto-track Claude Code thread time to a Grava project or client.",
       "category": "productivity",
       "keywords": ["time-tracking", "grava", "timer"]
