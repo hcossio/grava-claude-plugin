@@ -95,7 +95,10 @@ function readStdin() {
 // clean default ("Claude Code — <project name>").
 function cleanPromptText(raw) {
   return String(raw || '')
-    .replace(/<[^>]+>/g, ' ')
+    .replace(/<[^>]+>/g, ' ')                       // system envelopes / xml-ish tags
+    .replace(/@"[^"]*"/g, ' ')                       // quoted @file mentions: @"/root/.claude/uploads/..."
+    .replace(/@\S*\/\S+/g, ' ')                      // bare @path mentions
+    .replace(/\/(?:root|home|Users|tmp)\/\S+/g, ' ') // stray absolute paths (e.g. upload paths)
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -329,13 +332,7 @@ async function main() {
   const cwd = input.cwd || process.cwd();
   if (!event || !sessionId) return;
 
-  // Fast path: PreToolUse only matters to resume a paused timer or to heartbeat.
   const priorState = (loadTimerState()[sessionId] || {}).state;
-  if (event === 'PreToolUse' && priorState !== 'paused') {
-    // Still send a heartbeat so a long autonomous turn keeps the timer alive.
-    if (priorState === 'running') await heartbeat(config, sessionId);
-    return;
-  }
 
   // Resolve the Grava target: env (cloud) wins, else the local folder map.
   const project = resolveTargetFromEnv() || resolveProjectFromConfig(config, cwd);
@@ -348,16 +345,68 @@ async function main() {
     return;
   }
 
+  const startBody = (description) => {
+    const b = { description, source: 'claude-code', externalRef: sessionId, startTime: eventTime };
+    if (project.projectId) b.projectId = project.projectId;
+    else b.clientId = clientId;
+    return b;
+  };
+
+  // ── Cloud project threads: ONE continuous timer per thread ──
+  // A thread is an autonomous worker, not an interactive human session: the
+  // coordinator drives many short turns and auto-mode fires constant tool
+  // events. The local start-on-prompt / stop-on-turn-end model would shatter a
+  // thread's work into dozens of 2-second slivers. Instead: start once
+  // (idempotent — the backend returns the existing running entry), heartbeat on
+  // activity to keep it alive, and stop only when the thread ends. The backend
+  // idle sweeper closes it if the sandbox dies without a SessionEnd. No
+  // per-turn Stop, no Notification pause (a thread isn't waiting on a human).
+  if (IS_CLOUD) {
+    if (event === 'Stop' || event === 'Notification') return; // keep one timer running across turns
+
+    if (event === 'SessionEnd') {
+      const res = await api(config, 'POST', '/api/time-entries/stop-by-ref', {
+        externalRef: sessionId,
+        endTime: eventTime
+      });
+      saveTimerState(sessionId, 'stopped');
+      log(config, `${event} ${sessionId} stop -> ${res.status}`);
+      return;
+    }
+
+    // UserPromptSubmit / SessionStart / PreToolUse -> ensure a single running
+    // timer, then heartbeat. Starting on every prompt is safe (idempotent) and
+    // self-heals if the idle sweeper closed a previous burst during a long gap.
+    if (event === 'UserPromptSubmit' || event === 'SessionStart') {
+      let description = (priorState === 'running') && (loadTimerState()[sessionId] || {}).description;
+      if (!description) {
+        const sessionName = await getSessionName(config, sessionId, input.prompt);
+        description = sessionName || `Claude Code — ${project.name || 'work'}`;
+      }
+      const res = await api(config, 'POST', '/api/time-entries', startBody(description)); // idempotent
+      saveTimerState(sessionId, 'running', description);
+      await heartbeat(config, sessionId);
+      log(config, `${event} ${sessionId} start "${description}" -> ${res.status}`);
+    } else if (event === 'PreToolUse') {
+      await heartbeat(config, sessionId);
+    }
+    return;
+  }
+
+  // ── Local interactive sessions: start / pause / resume / stop per turn ──
+  // Here fragmentation is desired: it reflects active work vs. time the user
+  // stepped away (Notification pauses, PreToolUse resumes).
+  if (event === 'PreToolUse' && priorState !== 'paused') {
+    if (priorState === 'running') await heartbeat(config, sessionId);
+    return;
+  }
+
   if (event === 'UserPromptSubmit' || event === 'SessionStart') {
     const sessionName = await getSessionName(config, sessionId, input.prompt);
     const description =
       sessionName || project.description || `Claude Code — ${project.name || 'work'}`;
 
-    const body = { description, source: 'claude-code', externalRef: sessionId, startTime: eventTime };
-    if (project.projectId) body.projectId = project.projectId;
-    else body.clientId = clientId;
-
-    const res = await api(config, 'POST', '/api/time-entries', body);
+    const res = await api(config, 'POST', '/api/time-entries', startBody(description));
     saveTimerState(sessionId, 'running', description);
     await heartbeat(config, sessionId);
     log(config, `${event} ${sessionId} start "${description}" -> ${res.status}`);
@@ -380,18 +429,10 @@ async function main() {
   } else if (event === 'PreToolUse') {
     // Reached only when paused: work resumed, restart the clock.
     const saved = (loadTimerState()[sessionId] || {}).description;
-    const body = {
-      description: saved || `Claude Code — ${project.name || 'work'}`,
-      source: 'claude-code',
-      externalRef: sessionId,
-      startTime: eventTime
-    };
-    if (project.projectId) body.projectId = project.projectId;
-    else body.clientId = clientId;
-    const res = await api(config, 'POST', '/api/time-entries', body);
+    const res = await api(config, 'POST', '/api/time-entries', startBody(saved || `Claude Code — ${project.name || 'work'}`));
     saveTimerState(sessionId, 'running');
     await heartbeat(config, sessionId);
-    log(config, `${event} ${sessionId} resume "${body.description}" -> ${res.status}`);
+    log(config, `${event} ${sessionId} resume -> ${res.status}`);
   }
 }
 
