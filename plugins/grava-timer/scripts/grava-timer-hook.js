@@ -390,22 +390,24 @@ async function main() {
 
   const priorState = (loadTimerState()[sessionId] || {}).state;
 
-  // Resolve the Grava target: env (cloud) wins, else the local folder map.
-  const project = resolveTargetFromEnv(cwd, input.prompt) || resolveProjectFromConfig(config, cwd);
-  const clientId =
-    project && project.clientId && typeof project.clientId === 'object'
-      ? project.clientId._id
-      : project && project.clientId;
-  if (!project || (!project.projectId && !clientId)) {
-    log(config, `${event} ${sessionId} skipped: no Grava target (env GRAVA_PROJECT_ID/GRAVA_CLIENT_ID or folder map)`);
-    return;
-  }
-
-  const startBody = (description) => {
-    const b = { description, source: 'claude-code', externalRef: sessionId, startTime: eventTime };
-    if (project.projectId) b.projectId = project.projectId;
-    else b.clientId = clientId;
-    return b;
+  // Resolve the Grava target lazily: env (cloud) wins, else the local folder
+  // map. This runs the GRAVA_PROJECTS repo/keyword match — including a `git`
+  // lookup — so only call it on events that actually start a timer, never on
+  // the high-frequency PreToolUse heartbeat path.
+  const resolveTarget = () => {
+    const project = resolveTargetFromEnv(cwd, input.prompt) || resolveProjectFromConfig(config, cwd);
+    const clientId =
+      project && project.clientId && typeof project.clientId === 'object'
+        ? project.clientId._id
+        : project && project.clientId;
+    if (!project || (!project.projectId && !clientId)) return null;
+    const startBody = (description) => {
+      const b = { description, source: 'claude-code', externalRef: sessionId, startTime: eventTime };
+      if (project.projectId) b.projectId = project.projectId;
+      else b.clientId = clientId;
+      return b;
+    };
+    return { project, clientId, startBody };
   };
 
   // ── Cloud project threads: ONE continuous timer per thread ──
@@ -419,6 +421,7 @@ async function main() {
   // per-turn Stop, no Notification pause (a thread isn't waiting on a human).
   if (IS_CLOUD) {
     if (event === 'Stop' || event === 'Notification') return; // keep one timer running across turns
+    if (event === 'PreToolUse') { await heartbeat(config, sessionId); return; } // cheap: no target resolution
 
     if (event === 'SessionEnd') {
       const res = await api(config, 'POST', '/api/time-entries/stop-by-ref', {
@@ -430,21 +433,20 @@ async function main() {
       return;
     }
 
-    // UserPromptSubmit / SessionStart / PreToolUse -> ensure a single running
-    // timer, then heartbeat. Starting on every prompt is safe (idempotent) and
-    // self-heals if the idle sweeper closed a previous burst during a long gap.
     if (event === 'UserPromptSubmit' || event === 'SessionStart') {
+      const t = resolveTarget();
+      if (!t) { log(config, `${event} ${sessionId} skipped: no Grava target`); return; }
+      // Start once (idempotent — backend returns the existing running entry);
+      // self-heals if the idle sweeper closed a previous burst during a gap.
       let description = (priorState === 'running') && (loadTimerState()[sessionId] || {}).description;
       if (!description) {
         const sessionName = await getSessionName(config, sessionId, input.prompt);
-        description = sessionName || `Claude Code — ${project.name || 'work'}`;
+        description = sessionName || `Claude Code — ${t.project.name || 'work'}`;
       }
-      const res = await api(config, 'POST', '/api/time-entries', startBody(description)); // idempotent
+      const res = await api(config, 'POST', '/api/time-entries', t.startBody(description));
       saveTimerState(sessionId, 'running', description);
       await heartbeat(config, sessionId);
       log(config, `${event} ${sessionId} start "${description}" -> ${res.status}`);
-    } else if (event === 'PreToolUse') {
-      await heartbeat(config, sessionId);
     }
     return;
   }
@@ -457,22 +459,30 @@ async function main() {
     return;
   }
 
-  if (event === 'UserPromptSubmit' || event === 'SessionStart') {
-    const sessionName = await getSessionName(config, sessionId, input.prompt);
-    const description =
-      sessionName || project.description || `Claude Code — ${project.name || 'work'}`;
-
-    const res = await api(config, 'POST', '/api/time-entries', startBody(description));
-    saveTimerState(sessionId, 'running', description);
-    await heartbeat(config, sessionId);
-    log(config, `${event} ${sessionId} start "${description}" -> ${res.status}`);
-  } else if (event === 'Stop' || event === 'SessionEnd') {
+  if (event === 'Stop' || event === 'SessionEnd') {
     const res = await api(config, 'POST', '/api/time-entries/stop-by-ref', {
       externalRef: sessionId,
       endTime: eventTime
     });
     saveTimerState(sessionId, 'stopped');
     log(config, `${event} ${sessionId} stop -> ${res.status}`);
+    return;
+  }
+
+  const t = resolveTarget();
+  if (!t) {
+    log(config, `${event} ${sessionId} skipped: no Grava target (env GRAVA_PROJECT_ID/GRAVA_CLIENT_ID or folder map)`);
+    return;
+  }
+
+  if (event === 'UserPromptSubmit' || event === 'SessionStart') {
+    const sessionName = await getSessionName(config, sessionId, input.prompt);
+    const description =
+      sessionName || t.project.description || `Claude Code — ${t.project.name || 'work'}`;
+    const res = await api(config, 'POST', '/api/time-entries', t.startBody(description));
+    saveTimerState(sessionId, 'running', description);
+    await heartbeat(config, sessionId);
+    log(config, `${event} ${sessionId} start "${description}" -> ${res.status}`);
   } else if (event === 'Notification') {
     if (priorState === 'running') {
       const res = await api(config, 'POST', '/api/time-entries/stop-by-ref', {
@@ -485,7 +495,7 @@ async function main() {
   } else if (event === 'PreToolUse') {
     // Reached only when paused: work resumed, restart the clock.
     const saved = (loadTimerState()[sessionId] || {}).description;
-    const res = await api(config, 'POST', '/api/time-entries', startBody(saved || `Claude Code — ${project.name || 'work'}`));
+    const res = await api(config, 'POST', '/api/time-entries', t.startBody(saved || `Claude Code — ${t.project.name || 'work'}`));
     saveTimerState(sessionId, 'running');
     await heartbeat(config, sessionId);
     log(config, `${event} ${sessionId} resume -> ${res.status}`);
