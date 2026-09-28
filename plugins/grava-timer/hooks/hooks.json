@@ -6,34 +6,12 @@
           {
             "type": "command",
             "command": "NODE_USE_ENV_PROXY=1 node \"${CLAUDE_PLUGIN_ROOT}/scripts/grava-timer-hook.js\"",
-            "timeout": 60
+            "timeout": 30
           }
         ]
       }
     ],
     "PreToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "NODE_USE_ENV_PROXY=1 node \"${CLAUDE_PLUGIN_ROOT}/scripts/grava-timer-hook.js\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "Notification": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "NODE_USE_ENV_PROXY=1 node \"${CLAUDE_PLUGIN_ROOT}/scripts/grava-timer-hook.js\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "Stop": [
       {
         "hooks": [
           {
