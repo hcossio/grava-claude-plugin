@@ -258,11 +258,67 @@ function resolveProjectFromConfig(config, cwd) {
   return bestKey ? { key: bestKey, ...config.projects[bestKey] } : null;
 }
 
+// origin remote of the thread's working repo, lower-cased (best-effort).
+function getGitRemote(cwd) {
+  try {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync('git', ['config', '--get', 'remote.origin.url'], {
+      cwd: cwd || process.cwd(),
+      timeout: 1500,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    return String(out).trim().toLowerCase();
+  } catch (_) {
+    return '';
+  }
+}
+
+// One Claude Project per client, but a client can have several Grava projects.
+// GRAVA_PROJECTS (JSON array) lets the hook pick the right project from what the
+// thread is working on — its repo (remote/cwd) or the prompt text — without a
+// separate Claude Project per Grava project. Shape:
+//   [{"id":"<gravaProjectId>","match":["website","atmossfront"]}, ...]
+// The longest matching token wins; no match -> client-level (GRAVA_CLIENT_ID).
+function pickProjectId(cwd, promptText) {
+  const raw = process.env.GRAVA_PROJECTS;
+  if (!raw) return null;
+  let list;
+  try {
+    list = JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+  if (!Array.isArray(list)) return null;
+
+  const hay = [
+    (cwd || '').toLowerCase(),
+    getGitRemote(cwd),
+    (cleanPromptText(promptText) || '').toLowerCase()
+  ].join(' ');
+
+  let best = null;
+  let bestLen = 0;
+  for (const e of list) {
+    if (!e || !e.id) continue;
+    const tokens = [].concat(e.match || [], e.aliases || [], e.repo || [], e.name ? [e.name] : []);
+    for (const t of tokens) {
+      const tok = String(t).toLowerCase().trim();
+      if (tok && tok.length > bestLen && hay.includes(tok)) {
+        best = e.id;
+        bestLen = tok.length;
+      }
+    }
+  }
+  return best;
+}
+
 // Cloud resolution: the Grava target comes from the project's environment.
-function resolveTargetFromEnv() {
-  const projectId = process.env.GRAVA_PROJECT_ID || null;
+// Client is fixed (GRAVA_CLIENT_ID); the Grava project is auto-picked per thread
+// from GRAVA_PROJECTS, then a static GRAVA_PROJECT_ID, else none (client-level).
+function resolveTargetFromEnv(cwd, promptText) {
   const clientId = process.env.GRAVA_CLIENT_ID || null;
   const name = process.env.GRAVA_NAME || '';
+  const projectId = pickProjectId(cwd, promptText) || process.env.GRAVA_PROJECT_ID || null;
   if (!projectId && !clientId) return null;
   return { key: 'env', projectId, clientId, name };
 }
@@ -335,7 +391,7 @@ async function main() {
   const priorState = (loadTimerState()[sessionId] || {}).state;
 
   // Resolve the Grava target: env (cloud) wins, else the local folder map.
-  const project = resolveTargetFromEnv() || resolveProjectFromConfig(config, cwd);
+  const project = resolveTargetFromEnv(cwd, input.prompt) || resolveProjectFromConfig(config, cwd);
   const clientId =
     project && project.clientId && typeof project.clientId === 'object'
       ? project.clientId._id
